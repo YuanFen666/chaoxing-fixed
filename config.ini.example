@@ -99,7 +99,7 @@ exam_warn_hours = 48
 ;  【想换回速度优先】provider = TikuAnevol,AI
 ;  并把 api/exam_take.py 里 tune_tiku_for_exam 的 anevol 超时压回 6 秒。
 ; ============================================================
-provider = TikuAnevol,AI
+provider = AI,TikuAnevol
 
 ; ---------- 网课小工具题库（GO题）----------
 ; 接口地址，留空会自动用这个默认值
@@ -140,7 +140,32 @@ false_list = 错误,错,×,否,不对,不正确
 ; 申请地址：https://platform.deepseek.com/api_keys   （充值几块钱能用很久）
 endpoint = https://api.deepseek.com/v1
 key = 
-model = deepseek-chat
+;
+; ⚠️ model 必须写**API 认的名字**，不是网页/客户端里显示的版本名：
+;      API 名            版本名（客户端显示）        正确率   每题约
+;      deepseek-flash    DeepSeek-V4.1-Flash        75%     ¥0.0017
+;      deepseek-v4-pro   DeepSeek-V4-Pro-0813        95%     ¥0.0045
+;    查当前可用列表：GET https://api.deepseek.com/v1/models
+;
+; 【踩过的坑】这里以前写的是 `deepseek-chat` —— 那个名字 API **根本不认**，
+; 请求会被静默回退到最弱的 flash，于是正确率一直是 75% 左右，
+; 而日志里看不出任何异常（2026-09-15 实测：同一批题 flash 75% / v4-pro 95%）。
+; 按官方文档，`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 这些旧名字
+; 仍被接受，但对应模型已退役、实际仍由 V4.1-Flash 服务 —— 所以别指望换个旧名就能升档。
+model = deepseek-flash
+
+; 多选题的解法（2026-09-15 新增）
+;   per_option（默认）逐项判断：把一道多选拆成 N 个独立的是非判断，再把判"对"的合起来
+;   all                一次性问（旧行为：让模型一次吐出所有正确项）
+;
+; 【为什么默认改成 per_option】实考 85 题按题型拆开：
+;     单选 35/40 = 87.5%    判断 26/30 = 86.7%    **多选 22/30 = 73.3%**
+;   多选是明显短板。用项目自己的管道在同一批判断题上实测 flash 90% / v4-pro 95%，
+;   说明模型和管道都正常 —— 问题在"一次吐出所有正确项"这种问法容易漏选或多选。
+; 代价：多选题每个选项一次请求（4 个选项 = 4 次），cache 命中的题不花钱。
+; 逐项判断失败、或判"对"的少于 2 个（多选题至少两个正确项）时会自动退回
+; 一次性问法，不会卡住也不会硬编一个可疑答案。
+multi_choice_mode = per_option
 ; AI 请求最小间隔（秒），防止 8 个 worker 同时答题把接口打爆
 min_interval_seconds = 3
 ; 可选：需要走代理时填，例如 http://127.0.0.1:7890，不需要留空

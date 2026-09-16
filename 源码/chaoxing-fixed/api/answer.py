@@ -864,6 +864,91 @@ class AI(_AnswerNormalizeMixin, Tiku):
                 logger.warning("AI 兜底调用失败 -> {}".format(text))
             return None
 
+    def _multi_mode(self) -> str:
+        """
+        多选题的解法，来自 config.ini 的 multi_choice_mode：
+            per_option（默认）逐项判断 —— 每个选项单独问一次是非题
+            all                一次性问（旧行为，一次吐出所有正确项）
+        写错/留空都按 per_option 算。
+
+        【为什么写得这么小心】_conf 是框架注入的，取值时可能还没有（比如单元测试
+        里直接 new 出来的实例）。这里要是抛异常，整条题库链都会跟着挂 ——
+        宁可退回默认值，也不能让一个配置项把刷课搞停。
+        """
+        try:
+            conf = getattr(self, "_conf", None) or {}
+            v = (conf.get("multi_choice_mode") or "per_option")
+        except Exception:  # noqa: BLE001
+            return "per_option"
+        v = str(v).strip().lower()
+        return v if v in ("per_option", "all") else "per_option"
+
+    @staticmethod
+    def _parse_yes_no(raw):
+        """
+        从模型输出里读是非结论。认不出返回 None
+        —— **绝不能默认当成"错"**，那会把"模型没说清"变成"这个选项错了"。
+        """
+        text = str(raw or "")
+        m = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+        if m:
+            text = m.group(1)
+        m = re.search(r'"(?:Answer)"\s*:\s*\[(.*?)\]', text, re.DOTALL)
+        if m:
+            text = m.group(1)
+        s = text.strip().strip('"\'[]{} ')
+        # 「不对 / 不正确」必须先于「对 / 正确」判断，否则会被误判成 yes
+        if any(w in s for w in ("不对", "不正确", "错误", "错", "否")):
+            return "no"
+        if any(w in s for w in ("对", "正确", "是", "√", "true", "True", "yes", "YES")):
+            return "yes"
+        return None
+
+    def _ask_multiple_per_option(self, q_info: dict, options_list):
+        """
+        多选题「逐项判断」：把一道多选拆成 N 个独立的是非判断，再把判为"对"的合起来。
+
+        返回：选项原文用 \\n 连接（和一次性问法一致，方便走同一套归一化）；
+              任何一个选项调用失败、或"对"少于 2 个（多选题至少两个正确项），
+              都返回 None —— 交给上层退回一次性问法，绝不硬编一个可疑答案。
+        """
+        if not options_list:
+            return None
+        system = ("下面给出【一道多选题】和它的【其中一个选项】。"
+                  "请只判断这一个选项的说法是否正确，不要考虑其它选项。"
+                  "以json格式输出：{\"Answer\": [\"对\"]} 或 {\"Answer\": [\"错\"]}。"
+                  "除此之外不要输出任何多余的内容，也不要使用MD语法。")
+        picks = []
+        for idx, opt in enumerate(options_list, 1):
+            completion = self._chat(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": "题目：{}\n待判断的选项：{}".format(
+                        q_info.get('title', ''), opt)},
+                ],
+            )
+            if completion is None:
+                logger.debug("多选题逐项判断：第 {}/{} 个选项调用失败".format(idx, len(options_list)))
+                return None
+            try:
+                raw = completion.choices[0].message.content
+            except Exception:  # noqa: BLE001
+                return None
+            verdict = self._parse_yes_no(raw)
+            logger.debug("  逐项判断 [{}/{}] {} -> {}".format(
+                idx, len(options_list), str(opt)[:28], verdict or "识别不了"))
+            if verdict == "yes":
+                picks.append(opt)
+            elif verdict is None:
+                return None
+
+        if len(picks) < 2:
+            logger.info("多选题逐项判断只得到 {} 个正确项（多选题至少 2 个），"
+                        "判定为不可靠，退回一次性问法".format(len(picks)))
+            return None
+        return "\n".join(picks)
+
     def _query(self, q_info: dict):
         def remove_md_json_wrapper(md_str):
             # 使用正则表达式匹配Markdown代码块并提取内容
@@ -881,6 +966,28 @@ class AI(_AnswerNormalizeMixin, Tiku):
         # 去掉 "A." / "A、" 之类标号后再喂给模型，防止模型直接回字母而非内容
         options_list = self._split_options(q_info)
         options = "\n".join(options_list)
+
+        # ---- 多选题：逐项判断 ----
+        # 【为什么】实考数据（2026-09-15，85 题）按题型拆开：
+        #     单选 35/40 = 87.5%   判断 26/30 = 86.7%   多选 22/30 = 73.3%
+        #   多选明显是短板。用项目自己的管道在同一批判断题上实测
+        #   flash 90% / v4-pro 95%，说明模型和管道都没问题 ——
+        #   问题在"一次吐出所有正确项"这种问法本身：模型很容易漏选或多选。
+        #   所以把一道多选拆成 N 个**独立的是非判断**（模型在这种题上很稳），
+        #   再把判为"对"的选项合起来。
+        #   逐项这条路失败/结果不合理时，会退回下面原来的一次性问法。
+        if q_info.get('type') == 'multiple' and self._multi_mode() != 'all':
+            try:
+                text = self._ask_multiple_per_option(q_info, options_list)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("多选题逐项判断出错，退回一次性问法 -> {}: {}".format(
+                    type(e).__name__, e))
+                text = None
+            if text:
+                self._cb_report(True)
+                return self._normalize_text_answer(text, 'multiple', options_list)
+            logger.info("多选题逐项判断没得到可用结果，改用一次性问法")
+
         # 判断题目类型
         if q_info['type'] == "single":
             completion = self._chat(

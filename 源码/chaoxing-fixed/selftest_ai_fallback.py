@@ -184,12 +184,23 @@ def main():
     results.append(report("AI 返回字母 'B' → 还原成选项原文", ok, "  答案={!r}".format(ans)))
 
     # 4) AI 返回多选题多个选项原文（列表）
+    #    注意：多选题**默认现在走「逐项判断」**（config 的 multi_choice_mode=per_option），
+    #    这条断言测的是旧的一次性问法，所以显式把这题切到 all 模式。
+    #    逐项判断本身的自测在 selftest_multi_choice.py。
     CALLS.clear()
     install(MISS, ANEVOL_MISS, ai_content='{"Answer": ["实事求是", "中国共产党的领导"]}')
     chain = build_chain()
+    for _p in getattr(chain, "providers", []) or []:
+        if _p.__class__.__name__ == "AI":
+            try:
+                _p._conf = dict(_p._conf or {})
+            except Exception:  # noqa: BLE001
+                _p._conf = {}
+            _p._conf["multi_choice_mode"] = "all"
     ans = chain.query({"title": "题4", "options": OPTIONS, "type": "multiple"})
     ok = (ans is not None and set(ans.split("\n")) == {"实事求是", "中国共产党的领导"})
-    results.append(report("AI 多选返回多个答案 → 换行拼接", ok, "  答案={!r}".format(ans)))
+    results.append(report("AI 多选返回多个答案 → 换行拼接（all 模式）", ok,
+                          "  答案={!r}".format(ans)))
 
     # 5) AI 判断题
     CALLS.clear()

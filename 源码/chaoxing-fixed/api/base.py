@@ -162,14 +162,25 @@ class Chaoxing:
             "independentId": 0,
         }
         logger.trace("正在尝试登录...")
-        resp = _session.post(_url, headers=gc.HEADERS, data=_data)
-        if resp and resp.json()["status"] == True:
+        try:
+            # 必须带超时：passport2 无响应时不设 timeout 会永久挂起，
+            # 界面只能杀进程重来（实测日志里反复出现「正在尝试登录...」后无下文）
+            resp = _session.post(_url, headers=gc.HEADERS, data=_data, timeout=(10, 30))
+        except RequestException as exc:
+            logger.error(f"登录请求失败: {exc}")
+            return {"status": False, "msg": f"登录请求失败（网络异常或超时）: {exc}"}
+        try:
+            resp_json = resp.json()
+        except ValueError:
+            logger.error(f"登录接口返回非 JSON（HTTP {resp.status_code}）")
+            return {"status": False, "msg": f"登录接口返回异常（HTTP {resp.status_code}），可能被拦截或需验证"}
+        if resp and resp_json.get("status") == True:
             save_cookies(_session)
             SessionManager.update_cookies()
             logger.info("登录成功...")
             return {"status": True, "msg": "登录成功"}
         else:
-            return {"status": False, "msg": str(resp.json()["msg2"])}
+            return {"status": False, "msg": str(resp_json.get("msg2", "未知错误"))}
 
     def _validate_cookie_session(self) -> bool:
         session = SessionManager.get_instance()._session
@@ -542,6 +553,9 @@ class Chaoxing:
 
             pbar.n = int(play_time)
             pbar.refresh()
+            # 强制停止检查点：播放等待最长 1 秒内可中断（优雅停止不打断当前任务点）
+            from api.abort import check_force_abort
+            check_force_abort()
             time.sleep(gc.THRESHOLD)
 
         logger.info("任务完成: {}", _job['name'])

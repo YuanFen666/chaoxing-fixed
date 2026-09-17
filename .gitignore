@@ -7,9 +7,18 @@ cookies.txt
 cache.json
 anevol_token.txt
 
+# 运行时状态（答案库 / 考试进度，含个人课程信息，不应入库）
+answer_key.json
+exam_state.json
+
 # 运行日志（含账号与题目信息）
 *.log
 chaoxing.log
+logs/
+
+# IDE 与临时目录
+.idea/
+.dsh-tmp/
 
 # 打包产物与缓存
 build/
@@ -21,3 +30,8 @@ __pycache__/
 
 # 本地备份
 备份配置/
+
+# ---- Python 虚拟环境 ----
+.venv/
+.venv-gui/
+.venv-py311/

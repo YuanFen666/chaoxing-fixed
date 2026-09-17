@@ -230,24 +230,25 @@ provider = AI,TikuAnevol
 ├── README.md                    本文件
 ├── 说明文档.md                  完整排查/实测记录（含考试可行性报告、踩坑清单）
 ├── config.ini.example           配置模板（复制成 config.ini 再填）
-├── start_chaoxing.bat           一键启动（Windows，GBK 编码）
-├── 源码/
-│   ├── chaoxing-fixed/          主程序源码
-│   │   ├── main.py              入口：worker 线程池 + 看门狗
-│   │   ├── api/answer.py        ★ 题库实现（题库链 / ANEVOL / 网课小工具 / AI 兜底）
-│   │   ├── api/exam.py          ★ 考试看板（只读）
-│   │   ├── api/base.py          超星接口封装（视频/文档/答题）
-│   │   ├── resource/            字体映射表（题干乱码修复用）
-│   │   ├── selftest_*.py        离线自测（见下）
-│   │   └── smoketest_live.py    真实网络冒烟（会消耗额度）
-│   └── anevol-bridge/           Plan B：本地桥接程序（用 TikuAdapter 方案时才需要）
-└── 工具脚本/
-    ├── anevol_quickcheck.py     单发探活：验证 ANEVOL 是否可用
-    ├── probe_anevol.py          鉴权矩阵探针
-    ├── analyze_concurrency.py   日志分析：统计视频并发分布
-    ├── analyze_startup.py       日志分析：对比开局节奏
-    ├── verify_exe_modules.py    离线校验 exe 里到底装了什么（解包内嵌 PYZ）
-    └── publish_to_github.ps1    一键发布到 GitHub（自动脱敏 + 密钥扫描闸门）
+├── start_gui.py                 ★ 一键启动 GUI（用 .venv-gui 环境）
+├── start_chaoxing.bat           一键启动命令行版（Windows，GBK 编码）
+├── gui/                         PySide6 + Fluent Widgets 界面
+│   ├── app.py                   主窗口 + 事件总线
+│   ├── backend.py               Qt 信号封装（Backend 事件 → Signal）
+│   └── pages/                   首页 / 课程 / 任务 / 考试 / 题库 / 配置
+├── bridge/                      应用后端（JSON 契约 + 事件流）
+│   ├── chaoxing_bridge.py       ★ Backend 主入口
+│   └── config_store.py          config.ini 块级改写（保留注释）
+└── 源码/
+    └── chaoxing-fixed/          主程序源码
+        ├── main.py              入口：worker 线程池 + 看门狗
+        ├── api/answer.py        ★ 题库实现（题库链 / ANEVOL / 网课小工具 / AI 兜底）
+        ├── api/exam.py          ★ 考试看板（只读）
+        ├── api/base.py          超星接口封装（视频/文档/答题）
+        ├── api/abort.py         两级停止（优雅 / 强制）
+        ├── resource/            字体映射表（题干乱码修复用）
+        ├── selftest_*.py        离线自测（见下）
+        └── smoketest_live.py    真实网络冒烟（会消耗额度）
 ```
 
 ---

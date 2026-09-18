@@ -60,7 +60,11 @@ def resource_path(relative_path: str) -> str:
     if getattr(sys, "frozen", False):
         candidates.append(os.path.dirname(os.path.abspath(sys.executable)))
     else:
-        candidates.append(os.path.dirname(os.path.abspath(__file__)))
+        module_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates.append(module_dir)
+        # 源码根目录（api/ 的上一级）：bridge/WPF 会把工作目录固定成仓库根，
+        # 而不是源码根，仅靠前两个候选会漏掉 源码/chaoxing-fixed/resource/
+        candidates.append(os.path.dirname(module_dir))
         candidates.append(os.path.abspath("."))
 
     candidates.append(os.path.abspath("."))

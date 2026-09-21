@@ -17,8 +17,7 @@ import requests
 
 from api.answer import Tiku
 from api.base import Chaoxing, Account, StudyResult
-from api.abort import abort_requested, check_abort, request_abort
-from api.exceptions import LoginError, InputFormatError, StudyAborted
+from api.exceptions import LoginError, InputFormatError
 from api.logger import logger
 from api.notification import Notification
 
@@ -568,9 +567,7 @@ class JobProcessor:
         max_threads = self.worker_num * 4
         while not self._stopping:
             time.sleep(3)
-            if self._stopping or abort_requested():
-                # 停止流程中 worker 退出是预期行为，watchdog 不能补位，
-                # 否则「停止」永远打不过「自动补位」
+            if self._stopping:
                 return
             alive = sum(1 for t in self.threads if t.is_alive())
             if alive >= self.worker_num:
@@ -591,20 +588,10 @@ class JobProcessor:
         threading.Thread(target=self.retry_thread, daemon=True).start()
         threading.Thread(target=self.watchdog_thread, daemon=True).start()
 
-        # Queue.join() 没有超时：worker 因「停止」退出后队列里还剩任务的话，
-        # join 会永远挂起 —— 改成轮询，收到停止信号就跳出来收尾。
-        while self.task_queue.unfinished_tasks > 0:
-            if abort_requested():
-                break
-            time.sleep(0.5)
+        self.task_queue.join()
         self._stopping = True
         time.sleep(0.5)
         self.task_queue.shutdown()
-        # retry 线程也堵在 retry_queue.get() 上，不一起 shutdown 的话
-        # 每跑一轮就泄漏一条线程（内嵌在 WPF 里进程不退出，泄漏是累积的）
-        self.retry_queue.shutdown()
-        if abort_requested():
-            raise StudyAborted("用户已停止")
 
 
     @log_error
@@ -625,13 +612,6 @@ class JobProcessor:
                 task.result = process_chapter(self.chaoxing, self.course, task.point, self.speed)
             except (KeyboardInterrupt, SystemExit):
                 raise
-            except StudyAborted:
-                # 用户停止：通知全局（别的 worker 在下一个章节边界也会停），
-                # 当前任务标记完成（避免 join 计数悬挂），然后本线程收工。
-                request_abort()
-                self.task_queue.task_done()
-                logger.info("worker 收到停止信号，退出")
-                return
             except BaseException as e:  # noqa: BLE001
                 if is_transient_error(e):
                     logger.warning(
@@ -707,8 +687,6 @@ class JobProcessor:
 
 def process_chapter(chaoxing: Chaoxing, course:dict[str, Any], point:dict[str, Any], speed:float) -> ChapterResult:
     """处理单个章节"""
-    # 章节边界是「优雅停止」的检查点：收到停止请求就在这里收工
-    check_abort()
     logger.info(f'当前章节: {point["title"]}')
     if point["has_finished"]:
         logger.info(f'章节：{point["title"]} 已完成所有任务点')

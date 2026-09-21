@@ -848,21 +848,67 @@ class AI(_AnswerNormalizeMixin, Tiku):
                 time.sleep(wait)
             self.last_request_time = time.time()
 
-    def _chat(self, model, messages):
-        """所有模型调用都走这里：统一限流 + 熔断 + 错误分类。失败返回 None。"""
-        self._wait_interval()
+    def _thinking_kwargs(self) -> dict:
+        """
+        思考模式参数（2026-09-21 加）。
+
+        【为什么重要】官方文档：DeepSeek 的 thinking 模式**默认开启、且默认强度是 high**。
+        实测账单：18:00~19:00 共 44,678 tokens，其中
+            输入（未命中缓存） 2,445      ← 只占 5.5%
+            **输出            42,233     ← 94.5% 全在这里**
+        输出这么高就是因为每道题都先"想"一大段（≈265 tokens/题），思考过程全按输出计费，
+        而输出单价还是输入的 4 倍 —— 这才是刷课账单的主要成本，跟"缓存命中"关系不大。
+
+        查题这种任务（从选项里挑答案）不需要最高强度的推理，所以给个开关：
+            thinking = disabled   每道题输出掉到十几个 token（最省）
+            thinking = low        **默认**：保留少量推理，省钱与准确率折中
+            thinking = enabled    恢复官方默认（effort 仍是 high，因为官方默认就是 high）
+        写错/留空按 low 走；任何异常都不抛 —— 绝不能因为一个开关把刷课搞停。
+        """
         try:
-            return self.client.chat.completions.create(model=model, messages=messages)
+            conf = getattr(self, "_conf", None) or {}
+            mode = str(conf.get("thinking") or "low").strip().lower()
+            effort = str(conf.get("reasoning_effort") or "low").strip().lower()
+        except Exception:  # noqa: BLE001
+            return {}
+        if effort not in ("low", "high", "max"):
+            effort = "low"
+        if mode == "disabled":
+            # 关掉思考时不再传 reasoning_effort（都没有思考了，谈不上强度）
+            return {"extra_body": {"thinking": {"type": "disabled"}}}
+        if mode == "enabled":
+            return {"reasoning_effort": effort,
+                    "extra_body": {"thinking": {"type": "enabled"}}}
+        return {"reasoning_effort": effort,
+                "extra_body": {"thinking": {"type": "enabled"}}}
+
+    def _chat_failed(self, e):
+        """统一的调用失败处理：分类 + 报熔断 + 返回 None。"""
+        status = getattr(e, "status_code", None)
+        text = "{}: {}".format(type(e).__name__, str(e)[:200])
+        fatal = status in (401, 402, 403) or any(w in str(e).lower() for w in _AI_FATAL_WORDS)
+        self._cb_report(False, fatal=fatal)
+        if fatal:
+            logger.error("AI 兜底调用被拒（余额/鉴权问题）-> {}".format(text))
+        else:
+            logger.warning("AI 兜底调用失败 -> {}".format(text))
+        return None
+
+    def _chat(self, model, messages):
+        """所有模型调用都走这里：统一限流 + 熔断 + 错误分类 + 思考模式开关。失败返回 None。"""
+        self._wait_interval()
+        kwargs = self._thinking_kwargs()
+        try:
+            return self.client.chat.completions.create(model=model, messages=messages, **kwargs)
+        except TypeError:
+            # 某些 OpenAI 兼容端点（或旧版 SDK）不认 extra_body / reasoning_effort；
+            # 这时退回不带它们的调用 —— 能跑通比省钱重要。
+            try:
+                return self.client.chat.completions.create(model=model, messages=messages)
+            except Exception as e:  # noqa: BLE001
+                return self._chat_failed(e)
         except Exception as e:  # noqa: BLE001
-            status = getattr(e, "status_code", None)
-            text = "{}: {}".format(type(e).__name__, str(e)[:200])
-            fatal = status in (401, 402, 403) or any(w in str(e).lower() for w in _AI_FATAL_WORDS)
-            self._cb_report(False, fatal=fatal)
-            if fatal:
-                logger.error("AI 兜底调用被拒（余额/鉴权问题）-> {}".format(text))
-            else:
-                logger.warning("AI 兜底调用失败 -> {}".format(text))
-            return None
+            return self._chat_failed(e)
 
     def _multi_mode(self) -> str:
         """

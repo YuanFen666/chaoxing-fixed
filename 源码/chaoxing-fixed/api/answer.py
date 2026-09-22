@@ -875,7 +875,11 @@ class AI(_AnswerNormalizeMixin, Tiku):
             effort = "low"
         if mode == "disabled":
             # 关掉思考时不再传 reasoning_effort（都没有思考了，谈不上强度）
-            return {"extra_body": {"thinking": {"type": "disabled"}}}
+            # 【temperature=0 很关键】实测同一批 25 道判断题，两次运行差了 8 个百分点
+            # （88% vs 96%）—— 因为默认 temperature=1，每次采样都不一样。
+            # 文档：temperature 只在 thinking 模式下被忽略，非思考模式**是生效的**。
+            return {"temperature": 0,
+                    "extra_body": {"thinking": {"type": "disabled"}}}
         if mode == "enabled":
             return {"reasoning_effort": effort,
                     "extra_body": {"thinking": {"type": "enabled"}}}
@@ -950,6 +954,45 @@ class AI(_AnswerNormalizeMixin, Tiku):
             return "yes"
         return None
 
+    def _consistency_n(self) -> int:
+        """
+        自洽性投票的采样次数，来自 config.ini 的 self_consistency（默认 1 = 关）。
+        设为 2/3 时：同一道题问多次（第 2 次起**把选项顺序打乱**），取多数结论 ——
+        单次靠猜的题两次答案往往不一致，投票能把这些"蒙对/蒙错"压下去。
+        """
+        try:
+            conf = getattr(self, "_conf", None) or {}
+            n = int(str(conf.get("self_consistency") or "1").strip())
+        except Exception:  # noqa: BLE001
+            return 1
+        return n if 1 <= n <= 4 else 1
+
+    @staticmethod
+    def _shuffle_options(text: str) -> str:
+        """
+        打乱选项顺序（只换行序，不动内容）。
+
+        为什么这样就够：喂给模型的选项**本来就去掉了 A./B. 标号**（见 _split_options），
+        模型回的是**选项内容**、我们再拿内容映射回字母。所以换行序不破坏映射，
+        却能让模型走一条不同的判断路径 —— 两次都得出同一结论才算"想清楚了"。
+        """
+        import random as _random
+        lines = [x for x in str(text or "").split("\n") if x.strip()]
+        if len(lines) < 2:
+            return text
+        _random.shuffle(lines)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _majority(votes):
+        """按归一化后的答案文本投票；两次以上一致就采信，各说各的则保留第一次。"""
+        clean = [str(v).strip() for v in votes if v]
+        if not clean:
+            return None
+        from collections import Counter
+        top, cnt = Counter(clean).most_common(1)[0]
+        return top if cnt >= 2 else clean[0]
+
     def _ask_multiple_per_option(self, q_info: dict, options_list):
         """
         多选题「逐项判断」：把一道多选拆成 N 个独立的是非判断，再把判为"对"的合起来。
@@ -996,6 +1039,32 @@ class AI(_AnswerNormalizeMixin, Tiku):
         return "\n".join(picks)
 
     def _query(self, q_info: dict):
+        # ---- 自洽性投票（self_consistency > 1 时启用）----
+        # 【为什么】关掉思考模式后实测正确率约 88%（flash 和 v4-pro 完全一样），
+        # 瓶颈已经不是"模型不够强"，而是某些题单次判断就是会错。做法：
+        # 同一题问 N 次，第 2 次起把选项顺序打乱（走不同的判断路径），取多数结论。
+        # 用 _in_vote 防止递归时再次投票（否则会指数级放大请求）。
+        _n = self._consistency_n()
+        if (_n > 1 and not getattr(self, "_in_vote", False)
+                and q_info.get("type") in ("single", "multiple", "judgement")):
+            self._in_vote = True
+            try:
+                votes = []
+                for _i in range(_n):
+                    _q = dict(q_info)
+                    if _i and _q.get("options"):
+                        _q["options"] = self._shuffle_options(_q["options"])
+                    votes.append(self._query(_q))
+                    if all(v == votes[0] for v in votes) and len(votes) >= 2:
+                        break          # 已经一致，不用再问
+                ans = self._majority(votes)
+                if len(set(str(v) for v in votes if v)) > 1:
+                    logger.info("自洽性投票：{} 次结论 = {} -> 采信 {!r}".format(
+                        len(votes), [str(v)[:12] for v in votes], str(ans)[:24]))
+                return ans
+            finally:
+                self._in_vote = False
+
         def remove_md_json_wrapper(md_str):
             # 使用正则表达式匹配Markdown代码块并提取内容
             pattern = r'^\s*```(?:json)?\s*(.*?)\s*```\s*$'
